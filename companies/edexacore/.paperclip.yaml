@@ -1,0 +1,44 @@
+schema: paperclip/v1
+schemaVersion: 7
+tasks:
+  gtm-plan-free-phase:
+    priority: high
+  launch-sales-kit:
+    priority: high
+  pilot-province-research:
+    priority: high
+    blockedBy:
+      - gtm-plan-free-phase
+  first-outreach-batch:
+    priority: high
+    blockedBy:
+      - pilot-province-research
+routines:
+  weekly-pipeline-review:
+    concurrencyPolicy: coalesce_if_active
+    triggers:
+      - kind: schedule
+        label: Thứ Hai 8:00
+        cronExpression: "0 8 * * 1"
+        timezone: Asia/Ho_Chi_Minh
+  daily-lead-research:
+    concurrencyPolicy: coalesce_if_active
+    triggers:
+      - kind: schedule
+        label: Ngày làm việc 9:00
+        cronExpression: "0 9 * * 1-5"
+        timezone: Asia/Ho_Chi_Minh
+  daily-outreach-follow-up:
+    concurrencyPolicy: coalesce_if_active
+    triggers:
+      - kind: schedule
+        label: Ngày làm việc 15:00
+        cronExpression: "0 15 * * 1-5"
+        timezone: Asia/Ho_Chi_Minh
+  weekly-activation-review:
+    concurrencyPolicy: coalesce_if_active
+    triggers:
+      - kind: schedule
+        label: Thứ Năm 9:00
+        cronExpression: "0 9 * * 4"
+        timezone: Asia/Ho_Chi_Minh
