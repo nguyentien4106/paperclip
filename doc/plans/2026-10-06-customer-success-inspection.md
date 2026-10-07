@@ -8,10 +8,10 @@ Automatic eligibility is seven days from stack creation (or recorded pooled
 claim), with no user/account/signup-age condition. The eventual bot and morning
 schedule are separate work.
 
-## Working state
+## Implementation and qualification
 
-- Paperclip: `codex/customer-success-inspection`, based on `c365a16e3`.
-- Cloud: same branch name, isolated worktree `/private/tmp/paperclip-cloud-customer-success`, based on `2bd057a2`.
+- Paperclip: `codex/customer-success-inspection`, updated to master `ac8f3eb14`.
+- Cloud: same branch name, isolated worktree `/private/tmp/paperclip-cloud-customer-success`, updated to master `044160d0`.
 - Core strict JWT/run-authority, versioned permit routes, explicit resource catalog,
   read-only transactions, instruction/workspace/asset/snapshot readers implemented.
 - Cloud broker, dedicated signer, durable store/migration, admin-session/capability
@@ -22,12 +22,16 @@ schedule are separate work.
   source/customer PostgreSQL databases, two Cloud broker replicas, HTTP permits,
   runtime-role append-only enforcement, one-year retention, the existing wake
   controller with a local provider, and binary file reads through Cloud.
-- Cloud root suite: 2,522 pass, 73 expected skips. Admin web: 777 pass, plus
-  approval-only capability coverage. Local routing/wake smoke passes.
+- Cloud root suite: 2,544 pass, 73 expected skips. Admin web: 779 pass. The 23
+  inspection checks cover scoped approval review, replay, revocation, bounded
+  anonymous audit traffic, and database-pool concurrency. Routing/wake smoke passes.
 - Browser acceptance verified native admin login, navigation, exact target review,
   approval, revocation, immediate disablement and persistence after refresh.
-- Full core typecheck and build pass. Full core test run and coordinated PR
-  review/check loops remain in progress. Nothing deployed or enabled.
+- Full core typecheck and build pass. The local broad test run recorded 14,277
+  passes and four failures in existing suites (two timeouts and two PR-metadata
+  mock assertions); all three affected suites pass on isolated reruns. The full
+  CI matrix passes at the implementation head. Public PR #15405 and its companion
+  Cloud PR carry current review/check status. No deployment or customer enablement.
 
 ## Required invariants
 
