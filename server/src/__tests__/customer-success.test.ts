@@ -26,6 +26,7 @@ import { customerSuccessRoutes, verifyInspectionPermit } from "../routes/custome
 import { agentIdentityService } from "../services/agent-identity.js";
 import { createLocalAgentJwt, verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { errorHandler } from "../middleware/error-handler.js";
+import { redactAgentAdapterConfig } from "../redaction.js";
 import type { StorageService } from "../storage/types.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -249,6 +250,15 @@ describe("customer-success read authority", () => {
     expect(Buffer.from(result.content, "base64").toString()).toEqual("# Investigate carefully\n");
     expect((await stat(file)).mtimeMs).toEqual(before.mtimeMs);
     expect((await db.select().from(schema.agentInstructionRevisions)).length).toEqual(count);
+    await writeFile(join(directory, ".env"), "CREDENTIAL=do-not-return");
+    await expect(
+      readCustomerSuccessResource(db, storage, {
+        operation: "instructions.file",
+        companyId,
+        resourceId: agentId,
+        path: ".env",
+      }),
+    ).rejects.toThrow("denied by policy");
     await symlink(file, join(directory, "linked.md"));
     await expect(
       readCustomerSuccessResource(db, storage, {
@@ -258,6 +268,61 @@ describe("customer-success read authority", () => {
         path: "linked.md",
       }),
     ).rejects.toThrow("symlink");
+  });
+  it("reuses environment redaction for project and routine configuration and revisions", async () => {
+    const env = {
+      CONFIG: { type: "plain" as const, value: "configuration-credential" },
+      REFERENCE: {
+        type: "secret_ref" as const,
+        secretId: randomUUID(),
+        version: "latest" as const,
+      },
+    };
+    const [project] = await db
+      .insert(schema.projects)
+      .values({ companyId, name: "Configured project", env })
+      .returning();
+    const [routine] = await db
+      .insert(schema.routines)
+      .values({ companyId, title: "Configured routine", env })
+      .returning();
+    const [revision] = await db
+      .insert(schema.routineRevisions)
+      .values({
+        companyId,
+        routineId: routine.id,
+        revisionNumber: 1,
+        title: routine.title,
+        snapshot: {
+          version: 1,
+          routine: { ...routine },
+          triggers: [],
+        } as typeof schema.routineRevisions.$inferInsert.snapshot,
+      })
+      .returning();
+    const expected = redactAgentAdapterConfig({ env }).env;
+    for (const [resource, resourceId] of [
+      ["projects", project.id],
+      ["routines", routine.id],
+      ["routineRevisions", revision.id],
+    ] as const) {
+      const row = (await readCustomerSuccessResource(db, storage, {
+        operation: "get",
+        resource,
+        companyId,
+        resourceId,
+      })) as { env?: unknown; snapshot?: { routine: { env: unknown } } };
+      expect(row.snapshot?.routine.env ?? row.env).toEqual(expected);
+      expect(JSON.stringify(row)).not.toContain("configuration-credential");
+    }
+    await expect(
+      readCustomerSuccessResource(db, storage, {
+        operation: "get",
+        resource: "users",
+        companyId,
+        resourceId: "missing",
+      }),
+    ).rejects.toThrow("not found");
   });
   it("asset bytes and bounded byte ranges are company scoped, without bypass URLs", async () => {
     const [asset] = await db
@@ -507,6 +572,14 @@ describe("customer-success read authority", () => {
       resourceId: skill.id,
     })) as { content: string };
     expect(Buffer.from(snapshot.content, "base64").toString()).toEqual("# Example");
+    await expect(
+      readCustomerSuccessResource(db, storage, {
+        operation: "skills.file",
+        companyId,
+        resourceId: skill.id,
+        path: ".env",
+      }),
+    ).rejects.toThrow("denied by policy");
     const versions = (await readCustomerSuccessResource(db, storage, {
       operation: "list",
       resource: "skillVersions",

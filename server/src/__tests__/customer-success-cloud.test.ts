@@ -52,7 +52,11 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
     const directory = await mkdtemp(join(tmpdir(), "inspection-journey-"));
     const servers: ReturnType<typeof createServer>[] = [];
     const serverErrors: string[] = [];
-    const pool = new pg.default.Pool({ connectionString: home.connectionString });
+    const pool = new pg.default.Pool({
+      connectionString: home.connectionString,
+      max: 2,
+      connectionTimeoutMillis: 1000,
+    });
     try {
       vi.stubEnv("PAPERCLIP_HOME", directory);
       vi.stubEnv("PAPERCLIP_INSTANCE_ID", "qualification-home");
@@ -137,8 +141,22 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
           "utf8",
         ),
       );
-      const store = new PostgresInspectionStore(pool);
       const registry = new InMemoryCloudHarnessRegistry();
+      let transactionReads = 0;
+      const registryForClient = (client: any) => ({
+        getStack: async (id: string) => {
+          await client.query("SELECT 1");
+          transactionReads++;
+          return registry.getStack(id);
+        },
+        getAccount: async (id: string) => {
+          await client.query("SELECT 1");
+          transactionReads++;
+          return registry.getCustomerSuccessAccount(id);
+        },
+        listStackIds: async () => registry.listCustomerSuccessStackIds(),
+      });
+      const store = new PostgresInspectionStore(pool, registryForClient);
       const now = new Date();
       registry.accountGroups.set("fixture-account", {
         id: "fixture-account",
@@ -245,8 +263,8 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
           keyId: identity.keyId,
           publicKeyPem: identity.publicKeyPem,
         },
-        enabled: true,
       });
+      await broker.configure("qualification-operator", { enabled: true });
       const program = `
         const {inspectionAgentClient}=await import(${JSON.stringify(pathToFileURL(resolve(cloudDist!, "customer-success/client.js")).href)});
         const call=inspectionAgentClient();
@@ -289,6 +307,28 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
       expect(audit.rows.map((r: { event: string }) => r.event)).toContain("read.completed");
       expect(audit.rows.map((r: { event: string }) => r.event)).toContain("stack.woken");
       expect(await tenantDb.select().from(issues)).toEqual([task]);
+      // The production SQL reader scopes before pagination and hides mixed
+      // approval cohorts and global policy records from tenant approvers.
+      await store.transaction(async (tx: any) => {
+        const localId = randomUUID();
+        const mixedId = randomUUID();
+        const foreignId = randomUUID();
+        for (const [id, detail, stackId] of [
+          [localId, { stackIds: ["qualification-stack"] }, undefined],
+          [mixedId, { stackIds: ["qualification-stack", "foreign-stack"] }, undefined],
+          [foreignId, {}, "foreign-stack"],
+        ])
+          await tx.audit({ id, at: tx.now, event: "scope.fixture", detail, stackId });
+        const scoped = await tx.audits(0, 100, ["qualification-stack"]);
+        expect(scoped.some((event: any) => event.id === localId)).toBe(true);
+        expect(scoped.some((event: any) => event.id === mixedId || event.id === foreignId)).toBe(
+          false,
+        );
+        expect(scoped.some((event: any) => event.event === "policy.changed")).toBe(false);
+        expect(await tx.audits(0, 100, [])).toEqual([]);
+        const last = await tx.audits(scoped.length - 1, 100, ["qualification-stack"]);
+        expect(last).toHaveLength(1);
+      });
       // Two independent pool connections prove consumption is durable, not a
       // process-local Set: exactly one replica can consume a signed challenge.
       const token = createLocalAgentJwt(agent.id, homeCompany.id, "process", run.id)!;
@@ -296,7 +336,7 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
       const { sign } = await import("node:crypto");
       const sig = sign(null, Buffer.from(c.bytes), identity.privateKeyPem).toString("base64url");
       const replica = new CustomerSuccessInspection({
-        store: new PostgresInspectionStore(pool),
+        store: new PostgresInspectionStore(pool, registryForClient),
         registry,
         signer,
         allowLoopback: true,
@@ -306,6 +346,22 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         replica.execute(token, c.challengeId, sig),
       ]);
       expect(competing.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const grants = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          broker.challenge(token, "grant", { stackId: "qualification-stack" }),
+        ),
+      );
+      const concurrentGrants = await Promise.all(
+        grants.map((proof) =>
+          broker.execute(
+            token,
+            proof.challengeId,
+            sign(null, Buffer.from(proof.bytes), identity.privateKeyPem).toString("base64url"),
+          ),
+        ),
+      );
+      expect(concurrentGrants).toHaveLength(4);
+      expect(transactionReads).toBeGreaterThan(0);
       // Prove append-only enforcement with a runtime role, even if someone
       // accidentally grants it UPDATE/DELETE privileges on the audit table.
       const client = await pool.connect();

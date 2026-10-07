@@ -13,7 +13,10 @@ import type { StorageService } from "../storage/types.js";
 import { HttpError, notFound, unprocessable } from "../errors.js";
 import { redactAgentAdapterConfig, redactEventPayload } from "../redaction.js";
 import { createRunSecretRedactionRegistry } from "./run-secret-redaction.js";
-import { workspaceFileResourceService } from "./workspace-file-resources.js";
+import {
+  assertWorkspaceFilePathAllowed,
+  workspaceFileResourceService,
+} from "./workspace-file-resources.js";
 import { deriveBundleState } from "./agent-instructions.js";
 import { readInstructionBytes } from "./agent-instruction-files.js";
 import { getRunLogStore } from "./run-log-store.js";
@@ -164,7 +167,10 @@ export async function readCustomerSuccessResource(
               ),
             );
           const { inArray } = await import("drizzle-orm");
-          if (!memberships.length) return { items: [], nextOffset: null };
+          if (!memberships.length) {
+            if (q.operation === "get") throw notFound("Inspection resource not found");
+            return { items: [], nextOffset: null };
+          }
           predicates.push(
             inArray(
               all.id,
@@ -204,6 +210,25 @@ export async function readCustomerSuccessResource(
             beforeConfig: redactRevisionSnapshot(r.beforeConfig),
             afterConfig: redactRevisionSnapshot(r.afterConfig),
           }));
+        if (q.resource === "projects" || q.resource === "routines")
+          rows = rows.map((r) => ({ ...r, env: redactAgentAdapterConfig({ env: r.env }).env }));
+        if (q.resource === "routineRevisions")
+          rows = rows.map((r) => {
+            const snapshot = r.snapshot as Record<string, unknown> | null;
+            const routine = snapshot?.routine as Record<string, unknown> | undefined;
+            return routine
+              ? {
+                  ...r,
+                  snapshot: {
+                    ...snapshot,
+                    routine: {
+                      ...routine,
+                      env: redactAgentAdapterConfig({ env: routine.env }).env,
+                    },
+                  },
+                }
+              : r;
+          });
         if (q.resource === "runs")
           rows = await createRunSecretRedactionRegistry(tx).redactForRuns(
             q.companyId!,
@@ -243,7 +268,9 @@ export async function readCustomerSuccessResource(
           agent as unknown as Parameters<typeof deriveBundleState>[0],
         );
         if (!state.rootPath) return unavailable("instructions_not_configured");
-        const bytes = await readInstructionBytes(state.rootPath, q.path ?? state.entryFile);
+        const relative = q.path ?? state.entryFile;
+        assertWorkspaceFilePathAllowed(relative);
+        const bytes = await readInstructionBytes(state.rootPath, relative);
         return bytes
           ? binary(bytes, bytes.length, 0, "text/plain; charset=utf-8")
           : unavailable("instructions_file_missing");
@@ -251,6 +278,7 @@ export async function readCustomerSuccessResource(
       if (q.operation === "skills.file") {
         const skill = await ownRow(tx, schema.companySkills, q.companyId!, q.resourceId!);
         const relative = q.path ?? "SKILL.md";
+        assertWorkspaceFilePathAllowed(relative);
         const versionId = q.versionId ?? skill.currentVersionId;
         // Installed version snapshots are authoritative. Reading must not invoke
         // inventory reconciliation, checkout, fetching, adoption or materialization.
