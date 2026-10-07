@@ -1,0 +1,289 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import express from "express";
+import { describe, it, expect, vi } from "vitest";
+import { createDb, agents, companies, heartbeatRuns, issues } from "@paperclipai/db";
+import { customerSuccessRoutes } from "../routes/customer-success.js";
+import { agentIdentityService } from "../services/agent-identity.js";
+import { createLocalAgentJwt } from "../agent-auth-jwt.js";
+import { execute } from "../adapters/process/execute.js";
+import { errorHandler } from "../middleware/error-handler.js";
+import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import type { StorageService } from "../storage/types.js";
+
+// Coordinated qualification against the sibling Cloud build, never a customer
+// stack or hosted provider. Default unit runs have no cross-repository dependency.
+const cloudDist = process.env.PAPERCLIP_INSPECTION_CLOUD_DIST;
+describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qualification", () => {
+  it("uses the existing managed-runtime identity, active JWT, PostgreSQL broker, HTTP permits, and audited tenant reads", async () => {
+    const load = (module: string) => import(pathToFileURL(resolve(cloudDist!, module)).href);
+    const [
+      { CustomerSuccessInspection },
+      { InspectionSigner },
+      { PostgresInspectionStore },
+      { inspectionRoute },
+      { InMemoryCloudHarnessRegistry },
+      pg,
+    ] = await Promise.all([
+      load("customer-success/service.js"),
+      load("customer-success/crypto.js"),
+      load("customer-success/store.js"),
+      load("customer-success/routes.js"),
+      load("provisioner/memory.js"),
+      load("../node_modules/pg/lib/index.js"),
+    ]);
+    const home = await startEmbeddedPostgresTestDatabase("inspection-home-");
+    const tenant = await startEmbeddedPostgresTestDatabase("inspection-customer-");
+    const directory = await mkdtemp(join(tmpdir(), "inspection-journey-"));
+    const servers: ReturnType<typeof createServer>[] = [];
+    const pool = new pg.default.Pool({ connectionString: home.connectionString });
+    try {
+      vi.stubEnv("PAPERCLIP_HOME", directory);
+      vi.stubEnv("PAPERCLIP_INSTANCE_ID", "qualification-home");
+      vi.stubEnv("PAPERCLIP_AGENT_JWT_SECRET", "isolated-qualification-jwt");
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY_FILE", join(directory, "master.key"));
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "");
+      vi.stubEnv("PAPERCLIP_CUSTOMER_SUCCESS_AUTHORITY_ENABLED", "true");
+      vi.stubEnv("PAPERCLIP_CUSTOMER_SUCCESS_INSPECTION_ENABLED", "true");
+      vi.stubEnv("PAPERCLIP_CLOUD_STACK_ID", "qualification-stack");
+      const homeDb = createDb(home.connectionString);
+      const tenantDb = createDb(tenant.connectionString);
+      const [homeCompany] = await homeDb
+        .insert(companies)
+        .values({ name: "Internal", issuePrefix: "INT" })
+        .returning();
+      const [agent] = await homeDb
+        .insert(agents)
+        .values({
+          companyId: homeCompany.id,
+          name: "Success qualification",
+          adapterType: "process",
+        })
+        .returning();
+      const identity = await agentIdentityService(homeDb).ensureAgentIdentity(
+        homeCompany.id,
+        agent.id,
+      );
+      const [run] = await homeDb
+        .insert(heartbeatRuns)
+        .values({
+          companyId: homeCompany.id,
+          agentId: agent.id,
+          status: "running",
+          startedAt: new Date(),
+        })
+        .returning();
+      const [customer] = await tenantDb
+        .insert(companies)
+        .values({ name: "Synthetic customer", issuePrefix: "SYN" })
+        .returning();
+      const [task] = await tenantDb
+        .insert(issues)
+        .values({ companyId: customer.id, title: "First successful task" })
+        .returning();
+      const storage = { provider: "local_disk" } as StorageService;
+      const start = async (handler: Parameters<typeof createServer>[0]) => {
+        const server = createServer(handler);
+        servers.push(server);
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      };
+      const homeApp = express();
+      homeApp.use(express.json());
+      homeApp.use("/api/customer-success/v1", customerSuccessRoutes(homeDb, storage));
+      homeApp.use(errorHandler);
+      const sourceOrigin = await start(homeApp);
+      const tenantApp = express();
+      tenantApp.use(express.json());
+      tenantApp.use("/api/customer-success/v1", customerSuccessRoutes(tenantDb, storage));
+      tenantApp.use(errorHandler);
+      const tenantOrigin = await start(tenantApp);
+      await pool.query("CREATE SCHEMA cloud_harness");
+      await pool.query(
+        await readFile(
+          resolve(cloudDist!, "../migrations/0058_customer_success_inspection.sql"),
+          "utf8",
+        ),
+      );
+      const store = new PostgresInspectionStore(pool);
+      const registry = new InMemoryCloudHarnessRegistry();
+      const now = new Date();
+      registry.accountGroups.set("fixture-account", {
+        id: "fixture-account",
+        kind: "customer",
+        billingStatus: "unconfigured",
+      });
+      registry.stacks.set("qualification-stack", {
+        id: "qualification-stack",
+        accountGroupId: "fixture-account",
+        displayName: "Synthetic customer",
+        primaryHost: "fixture.example.test",
+        kind: "customer_production",
+        lifecycleState: "active",
+        sleepState: "awake",
+        rolloutMetadata: { track: "stable" },
+        providerRefs: [
+          {
+            provider: "railway",
+            resourceType: "service_domain:web",
+            externalId: "fixture",
+            metadata: { upstreamOrigin: tenantOrigin },
+          },
+        ],
+        createdAt: now,
+      });
+      const signer = new InspectionSigner(
+        "qualification",
+        generateKeyPairSync("ed25519").privateKey.export({ format: "jwk" }),
+      );
+      vi.stubEnv("PAPERCLIP_CUSTOMER_SUCCESS_INSPECTION_JWKS", signer.publicJwks);
+      const broker = new CustomerSuccessInspection({
+        store,
+        registry,
+        signer,
+        allowLoopback: true,
+      });
+      const cloudOrigin = await start(async (req, res) => {
+        try {
+          const handled = await inspectionRoute({
+            req,
+            res,
+            url: new URL(req.url!, "http://localhost"),
+            service: broker,
+            authenticateHuman: async () => {
+              throw new Error("Qualification never uses human access");
+            },
+            readJson: async (request: AsyncIterable<Buffer>, max: number) => {
+              const parts: Buffer[] = [];
+              let bytes = 0;
+              for await (const part of request) {
+                bytes += part.length;
+                if (bytes > max) throw new Error("Too large");
+                parts.push(part);
+              }
+              return JSON.parse(Buffer.concat(parts).toString());
+            },
+          });
+          if (!handled) {
+            res.statusCode = 404;
+            res.end();
+          }
+        } catch {
+          res.statusCode = 503;
+          res.end("{}");
+        }
+      });
+      vi.stubEnv("PAPERCLIP_CUSTOMER_SUCCESS_CLOUD_ORIGIN", cloudOrigin);
+      await broker.configure("qualification-operator", {
+        binding: {
+          sourceOrigin,
+          instanceId: "qualification-home",
+          companyId: homeCompany.id,
+          agentId: agent.id,
+          keyId: identity.keyId,
+          publicKeyPem: identity.publicKeyPem,
+        },
+        enabled: true,
+      });
+      const program = `
+        const {inspectionAgentClient}=await import(${JSON.stringify(pathToFileURL(resolve(cloudDist!, "customer-success/client.js")).href)});
+        const call=inspectionAgentClient();
+        const discovery=await call('discover',{});
+        const grant=await call('grant',{stackId:'qualification-stack'});
+        const tasks=await call('read',{stackId:'qualification-stack',grantToken:grant.token,query:{operation:'list',resource:'tasks',companyId:${JSON.stringify(customer.id)}}});
+        console.log(JSON.stringify({stackCount:discovery.items.length,titles:tasks.items.map(t=>t.title)}));
+      `;
+      const programFile = join(directory, "qualify.mjs");
+      await writeFile(programFile, program);
+      const output: string[] = [];
+      const result = await execute({
+        runId: run.id,
+        agent,
+        agentIdentity: identity,
+        authToken: createLocalAgentJwt(agent.id, homeCompany.id, "process", run.id)!,
+        config: {
+          command: process.execPath,
+          args: [programFile],
+          cwd: directory,
+          env: { PAPERCLIP_CUSTOMER_SUCCESS_CLOUD_ORIGIN: cloudOrigin },
+        },
+        context: {},
+        runtime: { sessionId: null, sessionParams: null, taskKey: null },
+        onLog: async (_stream, chunk) => {
+          output.push(chunk);
+        },
+        onMeta: async () => {},
+      });
+      expect(result.exitCode, output.join("")).toBe(0);
+      expect(output.join("")).toContain("First successful task");
+      const audit = await pool.query(
+        "SELECT event FROM cloud_harness.customer_success_audit ORDER BY occurred_at",
+      );
+      expect(audit.rows.map((r: { event: string }) => r.event)).toContain("permit.consumed");
+      expect(audit.rows.map((r: { event: string }) => r.event)).toContain("read.completed");
+      expect(await tenantDb.select().from(issues)).toEqual([task]);
+      // Two independent pool connections prove consumption is durable, not a
+      // process-local Set: exactly one replica can consume a signed challenge.
+      const token = createLocalAgentJwt(agent.id, homeCompany.id, "process", run.id)!;
+      const c = await broker.challenge(token, "discover", {});
+      const { sign } = await import("node:crypto");
+      const sig = sign(null, Buffer.from(c.bytes), identity.privateKeyPem).toString("base64url");
+      const replica = new CustomerSuccessInspection({
+        store: new PostgresInspectionStore(pool),
+        registry,
+        signer,
+        allowLoopback: true,
+      });
+      const competing = await Promise.allSettled([
+        broker.execute(token, c.challengeId, sig),
+        replica.execute(token, c.challengeId, sig),
+      ]);
+      expect(competing.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      // Prove append-only enforcement with a runtime role, even if someone
+      // accidentally grants it UPDATE/DELETE privileges on the audit table.
+      const client = await pool.connect();
+      const runtimeRole = `inspection_runtime_${randomUUID().replaceAll("-", "")}`;
+      try {
+        await client.query(`CREATE ROLE ${runtimeRole}`);
+        await client.query(`GRANT USAGE ON SCHEMA cloud_harness TO ${runtimeRole}`);
+        await client.query(
+          `GRANT SELECT, UPDATE, DELETE ON cloud_harness.customer_success_audit TO ${runtimeRole}`,
+        );
+        await client.query(`SET ROLE ${runtimeRole}`);
+        await expect(
+          client.query("UPDATE cloud_harness.customer_success_audit SET event = 'rewritten'"),
+        ).rejects.toThrow("append-only");
+        await expect(
+          client.query("DELETE FROM cloud_harness.customer_success_audit"),
+        ).rejects.toThrow("append-only");
+      } finally {
+        await client.query("RESET ROLE");
+        client.release();
+      }
+      const { applyInspectionRetention } = await load("customer-success/retention.js");
+      await expect(applyInspectionRetention(pool, 364)).rejects.toThrow("at least one year");
+      await pool.query(
+        "INSERT INTO cloud_harness.customer_success_audit VALUES ($1,clock_timestamp() - interval '366 days','old.fixture','{}')",
+        [randomUUID()],
+      );
+      expect((await applyInspectionRetention(pool)).auditDeleted).toBe(1);
+      expect(
+        (await pool.query("SELECT count(*) FROM cloud_harness.customer_success_audit")).rows[0]
+          .count,
+      ).not.toBe("0");
+    } finally {
+      for (const server of servers.reverse())
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      await pool.end();
+      await tenant.cleanup();
+      await home.cleanup();
+      vi.unstubAllEnvs();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 60000);
+});
