@@ -20,7 +20,8 @@ schedule are separate work.
   The complete database snapshot remains equal before and after catalog reads.
 - Coordinated qualification passes with a real managed process agent, separate
   source/customer PostgreSQL databases, two Cloud broker replicas, HTTP permits,
-  runtime-role append-only enforcement and one-year retention.
+  runtime-role append-only enforcement, one-year retention, the existing wake
+  controller with a local provider, and binary file reads through Cloud.
 - Cloud root suite: 2,522 pass, 73 expected skips. Admin web: 777 pass, plus
   approval-only capability coverage. Local routing/wake smoke passes.
 - Browser acceptance verified native admin login, navigation, exact target review,

@@ -77,7 +77,8 @@ PAPERCLIP_INSPECTION_CLOUD_DIST=/absolute/path/paperclip-cloud/dist \
 
 The coordinated test uses two disposable local PostgreSQL databases, a real
 managed process with the existing identity/env injection, a PostgreSQL-backed
-Cloud broker, and HTTP permit consumption. It tests durable replay fencing and
+Cloud broker, HTTP permit consumption, the existing wake controller with a local
+provider, and bounded binary file reads. It tests durable replay fencing and
 never touches a customer. Cloud's operations document covers enrollment,
 capability grants, exclusions, approval/expiry/revocation, audit retention and
 rollback. During rollback, disable Cloud policy first, disable tenant inspection,

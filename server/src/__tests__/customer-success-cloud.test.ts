@@ -1,13 +1,21 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import express from "express";
 import { describe, it, expect, vi } from "vitest";
-import { createDb, agents, companies, heartbeatRuns, issues } from "@paperclipai/db";
+import {
+  createDb,
+  agents,
+  companies,
+  heartbeatRuns,
+  issues,
+  projects,
+  projectWorkspaces,
+} from "@paperclipai/db";
 import { customerSuccessRoutes } from "../routes/customer-success.js";
 import { agentIdentityService } from "../services/agent-identity.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
@@ -28,6 +36,7 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
       { PostgresInspectionStore },
       { inspectionRoute },
       { InMemoryCloudHarnessRegistry },
+      { CloudStackSleepController },
       pg,
     ] = await Promise.all([
       load("customer-success/service.js"),
@@ -35,12 +44,14 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
       load("customer-success/store.js"),
       load("customer-success/routes.js"),
       load("provisioner/memory.js"),
+      load("sleep/controller.js"),
       load("../node_modules/pg/lib/index.js"),
     ]);
     const home = await startEmbeddedPostgresTestDatabase("inspection-home-");
     const tenant = await startEmbeddedPostgresTestDatabase("inspection-customer-");
     const directory = await mkdtemp(join(tmpdir(), "inspection-journey-"));
     const servers: ReturnType<typeof createServer>[] = [];
+    const serverErrors: string[] = [];
     const pool = new pg.default.Pool({ connectionString: home.connectionString });
     try {
       vi.stubEnv("PAPERCLIP_HOME", directory);
@@ -82,9 +93,25 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         .insert(companies)
         .values({ name: "Synthetic customer", issuePrefix: "SYN" })
         .returning();
+      const [project] = await tenantDb
+        .insert(projects)
+        .values({ companyId: customer.id, name: "Qualification project" })
+        .returning();
+      const [workspace] = await tenantDb
+        .insert(projectWorkspaces)
+        .values({
+          companyId: customer.id,
+          projectId: project.id,
+          name: "Qualification files",
+          cwd: directory,
+        })
+        .returning();
+      const filePath = join(directory, "result.bin");
+      await writeFile(filePath, Buffer.from([0, 1, 2, 3, 4, 5]));
+      const fileBefore = await stat(filePath);
       const [task] = await tenantDb
         .insert(issues)
-        .values({ companyId: customer.id, title: "First successful task" })
+        .values({ companyId: customer.id, projectId: project.id, title: "First successful task" })
         .returning();
       const storage = { provider: "local_disk" } as StorageService;
       const start = async (handler: Parameters<typeof createServer>[0]) => {
@@ -124,8 +151,11 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         displayName: "Synthetic customer",
         primaryHost: "fixture.example.test",
         kind: "customer_production",
-        lifecycleState: "active",
-        sleepState: "awake",
+        lifecycleState: "sleeping",
+        sleepState: "sleeping",
+        sleepReason: "idle",
+        version: 1,
+        updatedAt: now,
         rolloutMetadata: { track: "stable" },
         providerRefs: [
           {
@@ -142,11 +172,37 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         generateKeyPairSync("ed25519").privateKey.export({ format: "jwk" }),
       );
       vi.stubEnv("PAPERCLIP_CUSTOMER_SUCCESS_INSPECTION_JWKS", signer.publicJwks);
+      // Use the production wake controller with a disposable local provider.
+      // The tenant HTTP process is already listening; no hosted stack is woken.
+      const sleep = new CloudStackSleepController({
+        registry,
+        provider: {
+          name: "fake",
+          wakeStack: async (
+            _id: string,
+            context: { stack: Record<string, unknown>; providerRefs: unknown[] },
+          ) => ({
+            stack: { ...context.stack, lifecycleState: "active", sleepState: "awake" },
+            resources: context.providerRefs,
+            secretRefs: { providerAdminCredentials: {} },
+            operations: [],
+          }),
+          inspectStack: async () => ({
+            stackId: "qualification-stack",
+            lifecycleState: "active",
+            sleepState: "awake",
+            resources: registry.stacks.get("qualification-stack").providerRefs,
+          }),
+        },
+      });
       const broker = new CustomerSuccessInspection({
         store,
         registry,
         signer,
         allowLoopback: true,
+        wakeStack: async (stackId: string) => {
+          await sleep.wakeStack({ stackId });
+        },
       });
       const cloudOrigin = await start(async (req, res) => {
         try {
@@ -173,7 +229,8 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
             res.statusCode = 404;
             res.end();
           }
-        } catch {
+        } catch (error) {
+          serverErrors.push(String(error));
           res.statusCode = 503;
           res.end("{}");
         }
@@ -196,7 +253,8 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         const discovery=await call('discover',{});
         const grant=await call('grant',{stackId:'qualification-stack'});
         const tasks=await call('read',{stackId:'qualification-stack',grantToken:grant.token,query:{operation:'list',resource:'tasks',companyId:${JSON.stringify(customer.id)}}});
-        console.log(JSON.stringify({stackCount:discovery.items.length,titles:tasks.items.map(t=>t.title)}));
+        const file=await call('read',{stackId:'qualification-stack',grantToken:grant.token,query:{operation:'files.download',companyId:${JSON.stringify(customer.id)},resourceId:${JSON.stringify(task.id)},context:{projectId:${JSON.stringify(project.id)},workspaceId:${JSON.stringify(workspace.id)}},path:'result.bin',range:{start:2,end:5}}});
+        console.log(JSON.stringify({stackCount:discovery.items.length,titles:tasks.items.map(t=>t.title),fileBytes:[...Buffer.from(file.content,'base64')]}));
       `;
       const programFile = join(directory, "qualify.mjs");
       await writeFile(programFile, program);
@@ -219,13 +277,17 @@ describe.skipIf(!cloudDist)("customer-success managed agent / Cloud / tenant qua
         },
         onMeta: async () => {},
       });
-      expect(result.exitCode, output.join("")).toBe(0);
+      expect(result.exitCode, [...output, ...serverErrors].join("\n")).toBe(0);
       expect(output.join("")).toContain("First successful task");
+      expect(output.join("")).toContain('"fileBytes":[2,3,4,5]');
+      expect((await stat(filePath)).mtimeMs).toBe(fileBefore.mtimeMs);
+      expect(await readFile(filePath)).toEqual(Buffer.from([0, 1, 2, 3, 4, 5]));
       const audit = await pool.query(
         "SELECT event FROM cloud_harness.customer_success_audit ORDER BY occurred_at",
       );
       expect(audit.rows.map((r: { event: string }) => r.event)).toContain("permit.consumed");
       expect(audit.rows.map((r: { event: string }) => r.event)).toContain("read.completed");
+      expect(audit.rows.map((r: { event: string }) => r.event)).toContain("stack.woken");
       expect(await tenantDb.select().from(issues)).toEqual([task]);
       // Two independent pool connections prove consumption is durable, not a
       // process-local Set: exactly one replica can consume a signed challenge.
