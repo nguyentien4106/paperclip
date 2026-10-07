@@ -30,7 +30,7 @@ description: Quy trình tìm trường tiểu học, THCS, THPT theo tỉnh/thà
 - Vượt qua đăng nhập, CAPTCHA, hoặc điều khoản sử dụng của website.
 - Gửi bất kỳ tin nhắn nào (bạn chỉ nghiên cứu).
 
-**Lý do:** Nghị định 13/2023/NĐ-CP và Luật Bảo vệ dữ liệu cá nhân yêu cầu xử lý dữ liệu cá nhân
+**Lý do:** Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15 và Nghị định 356/2025/NĐ-CP yêu cầu xử lý dữ liệu cá nhân
 có mục đích và căn cứ hợp pháp. Ưu tiên **kênh liên hệ của tổ chức** (email/SĐT của trường) hơn
 kênh của cá nhân; tên và chức vụ Ban giám hiệu được trường công bố công khai thì được ghi lại
 kèm nguồn để cá nhân hoá lời chào.

@@ -45,6 +45,6 @@ viên làm việc theo một luồng lead chung:
 ## Nguyên tắc bắt buộc
 
 - Chỉ dùng thông tin liên hệ **công khai, chính thức** của nhà trường; ghi nguồn cho mọi bản ghi.
-- Tuân thủ Nghị định 13/2023/NĐ-CP và Luật Bảo vệ dữ liệu cá nhân, Nghị định 91/2020/NĐ-CP về chống tin nhắn/email rác.
+- Tuân thủ Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15 và Nghị định 356/2025/NĐ-CP, Nghị định 91/2020/NĐ-CP về chống tin nhắn/email rác.
 - Không bao giờ liên hệ trực tiếp học sinh. Dữ liệu học sinh (trẻ em) chỉ đi vào hệ thống khi nhà trường đã có sự đồng ý hợp lệ của cha mẹ/người giám hộ.
 - Người nhận nói "không" → đánh dấu `do-not-contact` ngay lập tức, không liên hệ lại.

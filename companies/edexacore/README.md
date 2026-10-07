@@ -66,7 +66,7 @@ xử lý phản hồi & follow-up (T2–T6 15:00), rà soát kích hoạt (T5 9:
 ## Tuân thủ
 
 - Chỉ dùng thông tin liên hệ công khai, chính thức của nhà trường; mọi bản ghi có URL nguồn.
-- Nghị định 13/2023/NĐ-CP, Luật Bảo vệ dữ liệu cá nhân; Nghị định 91/2020/NĐ-CP về chống thư rác.
+- Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15 và Nghị định 356/2025/NĐ-CP; Nghị định 91/2020/NĐ-CP về chống thư rác.
 - Không liên hệ học sinh; dữ liệu học sinh cần sự đồng ý của cha mẹ/người giám hộ.
 - Từ chối → `do_not_contact` vĩnh viễn.
 
