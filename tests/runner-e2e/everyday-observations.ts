@@ -1,4 +1,4 @@
-import type { IssueComment } from "@paperclipai/shared";
+import type { IssueComment } from "../../packages/shared/src/types/issue.js";
 
 export interface StoryCheck {
   id: string;
