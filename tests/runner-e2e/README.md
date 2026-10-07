@@ -47,8 +47,8 @@ zero-call assertion has an actual counter rather than a missing-fixture default.
 
 The new decline oracle requires the saved decision, exactly one interaction,
 unchanged connection identities, and an explanation after the decision from a
-successful run of the same agent on the same native task. Exact comment run IDs
-own attribution; names, ordering or counts cannot substitute. Service/provider
+successful run of the same agent on the same native task. The public comment createdByRunId field
+owns attribution; names, ordering or counts cannot substitute. Service/provider
 declines require observed zero fixture calls. Notion setup ends before
 credentials or a service invocation; it does not qualify real Notion access.
 The original lifecycle, native identity, approval and document checks still run.

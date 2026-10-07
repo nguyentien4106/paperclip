@@ -1,8 +1,10 @@
+import type { StoryComment } from "./everyday-observations.js";
+
 type Decision = {
   id: string; kind: string; status: string; resolvedAt?: string | null;
   result?: { answers?: Array<{ questionId: string; optionIds?: string[] }> };
 };
-type Reply = { authorAgentId?: string | null; runId?: string | null; createdAt?: string; body?: unknown };
+type Reply = Pick<StoryComment, "authorAgentId" | "createdByRunId" | "createdAt" | "body">;
 type Run = { id: string; nativeIssueId?: string | null; agentId?: string | null; status: string; finishedAt?: string | null };
 
 // Additional oracle for the new neutral-prompt suite only. Historical Everyday
@@ -35,7 +37,7 @@ export function gradeConnectionGuidanceDecline(input: {
     Number.isFinite(Date.parse(reply.createdAt ?? "")) &&
     Date.parse(reply.createdAt!) >= resolvedAt);
   const attributed = afterDecision.filter(reply => input.runs.some(run =>
-    Boolean(reply.runId) && run.id === reply.runId && run.agentId === input.leadAgentId && run.nativeIssueId === input.issueId &&
+    Boolean(reply.createdByRunId) && run.id === reply.createdByRunId && run.agentId === input.leadAgentId && run.nativeIssueId === input.issueId &&
     run.status === "succeeded" && Date.parse(run.finishedAt ?? "") >= resolvedAt));
   const explainsUnavailable = (text: string) =>
     /declin|not now|could(?:n.t| not)|cannot|can.t|unable|unavailable|not (?:connect|retriev)|without (?:access|connect)/i.test(text);

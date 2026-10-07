@@ -78,7 +78,7 @@ tool-selection, polling or completion-protocol instruction. They still define
 the requested deliverable: a brief explanation if data is unavailable. This
 allows Done without pretending that unfinished required work is complete.
 
-New explanation checks join comment.runId to a successful run with the same
+New explanation checks join comment.createdByRunId to a successful run with the same
 agent and native issue. They reject absent/stale/wrong-agent/wrong-task output,
 missing decision timestamps, unrelated decisions, duplicate requests, missing
 call evidence, unauthorized calls and connection changes. They check saved
@@ -92,6 +92,10 @@ model profile and permissions. No production or workflow credentials are
 changed. No paid campaign is started by defining or testing this suite.
 
 ## Remaining coverage before any broad connection reduction
+
+A single saved interaction does not prove that an agent avoided repeating an
+idempotent request-tool call. This suite rejects duplicate saved decisions,
+not every repeated tool invocation.
 
 Successful new authentication/setup and tool refresh, existing-connection
 agent grants, useful independent work before yielding, explicit reconsideration
